@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Chat — DocAI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+    <link th:href="@{/css/app.css}" rel="stylesheet"/>
+    <style>
+        body, #app-wrapper { height: 100vh; overflow: hidden; }
+        .main-content { display: flex; flex-direction: column; height: 100vh; }
+        .chat-layout { display: flex; flex: 1; overflow: hidden; }
+        /* Chat sessions sidebar */
+        .chat-sidebar {
+            width: 260px; flex-shrink: 0; border-right: 1px solid #e9ecef;
+            overflow-y: auto; background: #f8f9fa;
+        }
+        /* Chat messages area */
+        .chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .messages-container { flex: 1; overflow-y: auto; padding: 1.5rem; }
+        .message-bubble { max-width: 80%; }
+        .message-bubble.user { margin-left: auto; }
+        .message-bubble.assistant { margin-right: auto; }
+        .bubble-content {
+            padding: .75rem 1rem; border-radius: 1rem; line-height: 1.5;
+            white-space: pre-wrap; word-break: break-word;
+        }
+        .user .bubble-content { background: #0d6efd; color: #fff; border-bottom-right-radius: .25rem; }
+        .assistant .bubble-content { background: #fff; border: 1px solid #e9ecef; border-bottom-left-radius: .25rem; }
+        .chat-input-area { border-top: 1px solid #e9ecef; background: #fff; padding: 1rem 1.5rem; }
+        .citation-pill {
+            display: inline-flex; align-items: center; gap: .35rem; font-size: .72rem;
+            background: #f0f4ff; border: 1px solid #c7d7fd; color: #3b5bdb;
+            border-radius: 1rem; padding: .2rem .6rem; cursor: pointer;
+            transition: background .15s;
+        }
+        .citation-pill:hover { background: #dde7ff; }
+        .typing-indicator span {
+            display: inline-block; width: 8px; height: 8px; background: #adb5bd;
+            border-radius: 50%; margin: 0 2px; animation: bounce 1.2s infinite;
+        }
+        .typing-indicator span:nth-child(2) { animation-delay: .2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: .4s; }
+        @keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-8px)} }
+    </style>
+</head>
+<body class="bg-light">
+<div class="d-flex" id="app-wrapper">
+
+    <!-- SIDEBAR -->
+    <nav id="sidebar" class="sidebar d-flex flex-column flex-shrink-0 p-3">
+        <a href="/dashboard" class="sidebar-brand d-flex align-items-center mb-4 text-decoration-none">
+            <i class="bi bi-robot fs-4 me-2 text-primary"></i>
+            <span class="fw-bold fs-5">DocAI</span>
+        </a>
+        <ul class="nav nav-pills flex-column mb-auto">
+            <li><a href="/dashboard" class="nav-link"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a></li>
+            <li><a href="/documents" class="nav-link"><i class="bi bi-file-earmark-pdf me-2"></i>Documents</a></li>
+            <li><a href="/upload" class="nav-link"><i class="bi bi-cloud-upload me-2"></i>Upload</a></li>
+            <li><a href="/chat" class="nav-link active"><i class="bi bi-chat-dots me-2"></i>Chat</a></li>
+            <li><a href="/search" class="nav-link"><i class="bi bi-search me-2"></i>Search</a></li>
+            <li sec:authorize="hasRole('ADMIN')"><a href="/admin" class="nav-link"><i class="bi bi-shield-check me-2"></i>Admin</a></li>
+        </ul>
+        <hr/>
+        <div class="dropdown">
+            <a href="#" class="d-flex align-items-center text-decoration-none dropdown-toggle" data-bs-toggle="dropdown">
+                <i class="bi bi-person-circle fs-4 me-2"></i>
+                <span class="fw-semibold text-truncate" sec:authentication="name">User</span>
+            </a>
+            <ul class="dropdown-menu dropdown-menu-dark text-small shadow">
+                <li><a class="dropdown-item" href="/profile"><i class="bi bi-person me-1"></i> Profile</a></li>
+                <li><hr class="dropdown-divider"/></li>
+                <li><form th:action="@{/logout}" method="post"><button type="submit" class="dropdown-item text-danger"><i class="bi bi-box-arrow-right me-1"></i> Sign out</button></form></li>
+            </ul>
+        </div>
+    </nav>
+
+    <!-- MAIN -->
+    <main class="main-content flex-grow-1">
+        <header class="top-bar d-flex align-items-center px-4 py-3 bg-white border-bottom shadow-sm flex-shrink-0">
+            <button class="btn btn-link d-lg-none me-2 p-0" id="sidebarToggle"><i class="bi bi-list fs-4"></i></button>
+            <h1 class="h5 mb-0 fw-semibold" id="chatTitle">Chat</h1>
+            <div class="ms-auto d-flex align-items-center gap-2">
+                <!-- Document filter -->
+                <select class="form-select form-select-sm" id="docFilter" style="max-width:200px">
+                    <option value="">All documents</option>
+                </select>
+                <button class="btn btn-sm btn-outline-secondary" id="renameChatBtn" title="Rename chat" style="display:none">
+                    <i class="bi bi-pencil"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger" id="deleteChatBtn" title="Delete chat" style="display:none">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </div>
+        </header>
+
+        <div class="chat-layout">
+            <!-- Chat sessions list -->
+            <div class="chat-sidebar p-2">
+                <button class="btn btn-primary btn-sm w-100 mb-2" id="newChatBtn">
+                    <i class="bi bi-plus-lg me-1"></i>New Chat
+                </button>
+                <div id="chatList" class="d-flex flex-column gap-1"></div>
+            </div>
+
+            <!-- Active chat area -->
+            <div class="chat-area">
+                <!-- Empty state -->
+                <div id="emptyState" class="messages-container d-flex align-items-center justify-content-center">
+                    <div class="text-center text-muted">
+                        <i class="bi bi-chat-dots display-4 mb-3 d-block opacity-40"></i>
+                        <h6>Start a conversation</h6>
+                        <p class="small">Click "New Chat" or select an existing chat.<br>Make sure you have uploaded and processed documents first.</p>
+                        <a href="/upload" class="btn btn-sm btn-outline-primary mt-1">
+                            <i class="bi bi-cloud-upload me-1"></i>Upload a PDF
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Messages -->
+                <div id="messagesContainer" class="messages-container d-none"></div>
+
+                <!-- Input area -->
+                <div class="chat-input-area d-none" id="inputArea">
+                    <div class="d-flex gap-2 align-items-end">
+                        <textarea id="questionInput" class="form-control" rows="2"
+                                  placeholder="Ask a question about your documents…"
+                                  style="resize:none; border-radius:.75rem"></textarea>
+                        <button class="btn btn-primary px-3 py-2" id="sendBtn" style="border-radius:.75rem">
+                            <i class="bi bi-send-fill"></i>
+                        </button>
+                    </div>
+                    <div class="text-muted mt-1" style="font-size:.72rem">
+                        <i class="bi bi-shield-check me-1 text-success"></i>
+                        Answers are grounded in your uploaded documents only · Press <kbd>Ctrl+Enter</kbd> to send
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Citation modal -->
+<div class="modal fade" id="citationModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header border-0">
+                <h6 class="modal-title fw-bold"><i class="bi bi-quote text-primary me-2"></i>Source Reference</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="citationModalBody"></div>
+        </div>
+    </div>
+</div>
+
+<div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:9999" id="toastContainer"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script th:src="@{/js/app.js}"></script>
+<script>
+    const api = window.DocAI;
+    const citationModal = new bootstrap.Modal(document.getElementById('citationModal'));
+    let activeChatId = null;
+    let chats = [];
+
+    // ── Init ─────────────────────────────────────────────────────────
+    async function init() {
+        await Promise.all([loadChats(), loadDocuments()]);
+
+        // If URL has chatId, open it
+        const params = new URLSearchParams(location.search);
+        const chatId = params.get('chatId') || params.get('id');
+        const docId  = params.get('docId');
+        if (docId) document.getElementById('docFilter').value = docId;
+        if (chatId) openChat(chatId);
+        else if (chats.length > 0) openChat(chats[0].id);
+    }
+
+    async function loadChats() {
+        try {
+            const data = await api.get('/api/chats?size=50');
+            chats = data.content || [];
+            renderChatList();
+        } catch(e) { console.error(e); }
+    }
+
+    async function loadDocuments() {
+        try {
+            const data = await api.get('/api/documents?size=100');
+            const sel = document.getElementById('docFilter');
+            (data.content || []).filter(d => d.status === 'COMPLETED').forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.id;
+                opt.textContent = d.originalName.length > 35
+                    ? d.originalName.substring(0,32) + '…'
+                    : d.originalName;
+                sel.appendChild(opt);
+            });
+        } catch(e) {}
+    }
+
+    function renderChatList() {
+        const list = document.getElementById('chatList');
+        if (chats.length === 0) {
+            list.innerHTML = `<div class="text-muted text-center small py-3">No chats yet</div>`;
+            return;
+        }
+        list.innerHTML = chats.map(c => `
+    <button class="btn btn-sm text-start w-100 chat-session-btn ${c.id === activeChatId ? 'active' : ''}"
+            id="chat-btn-${c.id}" onclick="openChat('${c.id}')">
+        <i class="bi bi-chat-left-text me-2 opacity-60"></i>
+        <span class="text-truncate">${escHtml(c.title)}</span>
+    </button>`).join('');
+    }
+
+    async function openChat(chatId) {
+        activeChatId = chatId;
+        document.getElementById('emptyState').classList.add('d-none');
+        document.getElementById('messagesContainer').classList.remove('d-none');
+        document.getElementById('inputArea').classList.remove('d-none');
+        document.getElementById('renameChatBtn').style.display = '';
+        document.getElementById('deleteChatBtn').style.display = '';
+
+        // Update sidebar active state
+        document.querySelectorAll('.chat-session-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('chat-btn-' + chatId)?.classList.add('active');
+
+        try {
+            const chat = await api.get(`/api/chats/${chatId}`);
+            document.getElementById('chatTitle').textContent = chat.title;
+            renderMessages(chat.messages || []);
+        } catch(e) { api.toast('Failed to load chat', 'danger'); }
+    }
+
+    function renderMessages(messages) {
+        const container = document.getElementById('messagesContainer');
+        if (messages.length === 0) {
+            container.innerHTML = `<div class="text-center text-muted py-4">
+            <i class="bi bi-chat-square-text display-6 mb-2 d-block opacity-40"></i>
+            <p class="small">No messages yet. Ask your first question below.</p>
+        </div>`;
+            return;
+        }
+
+        container.innerHTML = messages.map(m => renderMessage(m)).join('');
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function renderMessage(m) {
+        const isUser = m.role === 'USER';
+        const citationsHtml = (m.citations || []).length > 0
+            ? `<div class="mt-2 d-flex flex-wrap gap-1">
+            ${m.citations.map((c, i) => `
+            <span class="citation-pill" onclick="showCitation(${JSON.stringify(c).replace(/"/g,'&quot;')})">
+                <i class="bi bi-file-earmark-text"></i>
+                ${escHtml(c.documentName?.split('/').pop() || 'Source')} · p.${c.pageNumber}
+                <small class="opacity-75">${(c.similarityScore*100).toFixed(0)}%</small>
+            </span>`).join('')}
+           </div>` : '';
+
+        return `<div class="message-bubble ${isUser?'user':'assistant'} mb-3 d-flex flex-column">
+        <div class="d-flex align-items-center gap-2 mb-1 ${isUser?'justify-content-end':''}">
+            ${!isUser ? `<div class="avatar-sm bg-primary-subtle text-primary rounded-circle d-flex align-items-center justify-content-center" style="width:28px;height:28px;font-size:.75rem"><i class="bi bi-robot"></i></div>` : ''}
+            <span class="text-muted" style="font-size:.72rem">${isUser ? 'You' : 'DocAI'}</span>
+            ${isUser ? `<div class="avatar-sm bg-secondary-subtle text-secondary rounded-circle d-flex align-items-center justify-content-center" style="width:28px;height:28px;font-size:.75rem"><i class="bi bi-person"></i></div>` : ''}
+        </div>
+        <div class="bubble-content">${escHtml(m.content)}${!isUser ? citationsHtml : ''}</div>
+    </div>`;
+    }
+
+    function showCitation(c) {
+        document.getElementById('citationModalBody').innerHTML = `
+    <dl class="row small">
+        <dt class="col-sm-3 text-muted">Document</dt>
+        <dd class="col-sm-9">${escHtml(c.documentName || '—')}</dd>
+        <dt class="col-sm-3 text-muted">Page</dt>
+        <dd class="col-sm-9">${c.pageNumber || '—'}</dd>
+        <dt class="col-sm-3 text-muted">Similarity</dt>
+        <dd class="col-sm-9">
+            <div class="progress" style="height:6px;max-width:120px">
+                <div class="progress-bar bg-success" style="width:${((c.similarityScore||0)*100).toFixed(0)}%"></div>
+            </div>
+            <span class="text-muted">${((c.similarityScore||0)*100).toFixed(1)}%</span>
+        </dd>
+    </dl>
+    <hr/>
+    <h6 class="fw-semibold mb-2">Excerpt</h6>
+    <blockquote class="blockquote-sm bg-light rounded p-3 text-muted small">${escHtml(c.excerpt || '—')}</blockquote>`;
+        citationModal.show();
+    }
+
+    // ── Send message ──────────────────────────────────────────────────
+    async function sendMessage() {
+        const input = document.getElementById('questionInput');
+        const question = input.value.trim();
+        if (!question || !activeChatId) return;
+
+        const docId = document.getElementById('docFilter').value || null;
+        input.value = '';
+        input.style.height = 'auto';
+
+        // Append user bubble immediately
+        const container = document.getElementById('messagesContainer');
+        container.innerHTML += renderMessage({ role: 'USER', content: question, citations: [] });
+
+        // Typing indicator
+        const typingId = 'typing-' + Date.now();
+        container.innerHTML += `<div class="message-bubble assistant mb-3" id="${typingId}">
+        <div class="bubble-content">
+            <div class="typing-indicator"><span></span><span></span><span></span></div>
+        </div>
+    </div>`;
+        container.scrollTop = container.scrollHeight;
+
+        document.getElementById('sendBtn').disabled = true;
+
+        try {
+            const payload = { question };
+            if (docId) payload.documentId = docId;
+            const resp = await api.post(`/api/chats/${activeChatId}/messages`, payload);
+
+            // Replace typing indicator
+            document.getElementById(typingId)?.remove();
+            container.innerHTML += renderMessage(resp);
+            container.scrollTop = container.scrollHeight;
+
+            // Refresh chat list for updated title
+            await loadChats();
+            renderChatList();
+        } catch(e) {
+            document.getElementById(typingId)?.remove();
+            container.innerHTML += `<div class="message-bubble assistant mb-3">
+            <div class="bubble-content text-danger">
+                <i class="bi bi-exclamation-triangle me-1"></i>Error: ${escHtml(e.message)}
+            </div>
+        </div>`;
+            api.toast('Failed to get answer', 'danger');
+        } finally {
+            document.getElementById('sendBtn').disabled = false;
+            input.focus();
+        }
+    }
+
+    document.getElementById('sendBtn').addEventListener('click', sendMessage);
+    document.getElementById('questionInput').addEventListener('keydown', e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(); }
+    });
+
+    // ── New chat ──────────────────────────────────────────────────────
+    document.getElementById('newChatBtn').addEventListener('click', async () => {
+        try {
+            const chat = await api.post('/api/chats', {});
+            chats.unshift(chat);
+            renderChatList();
+            openChat(chat.id);
+        } catch(e) { api.toast('Failed to create chat', 'danger'); }
+    });
+
+    // ── Delete chat ───────────────────────────────────────────────────
+    document.getElementById('deleteChatBtn').addEventListener('click', async () => {
+        if (!activeChatId || !confirm('Delete this chat?')) return;
+        try {
+            await api.del(`/api/chats/${activeChatId}`);
+            chats = chats.filter(c => c.id !== activeChatId);
+            activeChatId = null;
+            document.getElementById('emptyState').classList.remove('d-none');
+            document.getElementById('messagesContainer').classList.add('d-none');
+            document.getElementById('inputArea').classList.add('d-none');
+            document.getElementById('renameChatBtn').style.display = 'none';
+            document.getElementById('deleteChatBtn').style.display = 'none';
+            document.getElementById('chatTitle').textContent = 'Chat';
+            renderChatList();
+        } catch(e) { api.toast('Delete failed', 'danger'); }
+    });
+
+    // ── Rename chat ───────────────────────────────────────────────────
+    document.getElementById('renameChatBtn').addEventListener('click', async () => {
+        if (!activeChatId) return;
+        const newTitle = prompt('New chat name:', document.getElementById('chatTitle').textContent);
+        if (!newTitle?.trim()) return;
+        try {
+            await api.put(`/api/chats/${activeChatId}/title?title=${encodeURIComponent(newTitle.trim())}`, {});
+            document.getElementById('chatTitle').textContent = newTitle.trim();
+            const chat = chats.find(c => c.id === activeChatId);
+            if (chat) { chat.title = newTitle.trim(); renderChatList(); }
+        } catch(e) { api.toast('Rename failed', 'danger'); }
+    });
+
+    // ── Auto-resize textarea ──────────────────────────────────────────
+    document.getElementById('questionInput').addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = Math.min(this.scrollHeight, 160) + 'px';
+    });
+
+    function escHtml(s) {
+        return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    init();
+</script>
+</body>
+</html>

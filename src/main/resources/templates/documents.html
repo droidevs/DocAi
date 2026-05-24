@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Documents — DocAI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+    <link th:href="@{/css/app.css}" rel="stylesheet"/>
+</head>
+<body class="bg-light">
+<div class="d-flex" id="app-wrapper">
+
+    <!-- SIDEBAR -->
+    <nav id="sidebar" class="sidebar d-flex flex-column flex-shrink-0 p-3">
+        <a href="/dashboard" class="sidebar-brand d-flex align-items-center mb-4 text-decoration-none">
+            <i class="bi bi-robot fs-4 me-2 text-primary"></i>
+            <span class="fw-bold fs-5">DocAI</span>
+        </a>
+        <ul class="nav nav-pills flex-column mb-auto">
+            <li><a href="/dashboard" class="nav-link"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a></li>
+            <li><a href="/documents" class="nav-link active"><i class="bi bi-file-earmark-pdf me-2"></i>Documents</a></li>
+            <li><a href="/upload" class="nav-link"><i class="bi bi-cloud-upload me-2"></i>Upload</a></li>
+            <li><a href="/chat" class="nav-link"><i class="bi bi-chat-dots me-2"></i>Chat</a></li>
+            <li><a href="/search" class="nav-link"><i class="bi bi-search me-2"></i>Search</a></li>
+            <li sec:authorize="hasRole('ADMIN')"><a href="/admin" class="nav-link"><i class="bi bi-shield-check me-2"></i>Admin</a></li>
+        </ul>
+        <hr/>
+        <div class="dropdown">
+            <a href="#" class="d-flex align-items-center text-decoration-none dropdown-toggle" data-bs-toggle="dropdown">
+                <i class="bi bi-person-circle fs-4 me-2"></i>
+                <span class="fw-semibold text-truncate" sec:authentication="name">User</span>
+            </a>
+            <ul class="dropdown-menu dropdown-menu-dark text-small shadow">
+                <li><a class="dropdown-item" href="/profile"><i class="bi bi-person me-1"></i> Profile</a></li>
+                <li><hr class="dropdown-divider"/></li>
+                <li><form th:action="@{/logout}" method="post"><button type="submit" class="dropdown-item text-danger"><i class="bi bi-box-arrow-right me-1"></i> Sign out</button></form></li>
+            </ul>
+        </div>
+    </nav>
+
+    <!-- MAIN -->
+    <main class="main-content flex-grow-1">
+        <header class="top-bar d-flex align-items-center px-4 py-3 bg-white border-bottom shadow-sm">
+            <button class="btn btn-link d-lg-none me-2 p-0" id="sidebarToggle"><i class="bi bi-list fs-4"></i></button>
+            <h1 class="h5 mb-0 fw-semibold">Documents</h1>
+            <div class="ms-auto d-flex gap-2">
+                <a href="/upload" class="btn btn-primary btn-sm">
+                    <i class="bi bi-plus-lg me-1"></i>Upload PDF
+                </a>
+            </div>
+        </header>
+
+        <div class="page-content p-4">
+            <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index:9999" id="toastContainer"></div>
+
+            <!-- Toolbar -->
+            <div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
+                <div class="input-group input-group-sm" style="max-width:280px">
+                    <span class="input-group-text"><i class="bi bi-search"></i></span>
+                    <input type="text" class="form-control" id="searchInput" placeholder="Search documents…"/>
+                </div>
+                <select class="form-select form-select-sm" id="statusFilter" style="max-width:160px">
+                    <option value="">All statuses</option>
+                    <option value="COMPLETED">Completed</option>
+                    <option value="PROCESSING">Processing</option>
+                    <option value="PENDING">Pending</option>
+                    <option value="FAILED">Failed</option>
+                </select>
+                <div class="ms-auto text-muted small" id="docCount">Loading…</div>
+            </div>
+
+            <!-- Document grid -->
+            <div id="docGrid" class="row g-3">
+                <div class="col-12 text-center py-5">
+                    <div class="spinner-border text-primary" role="status"></div>
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            <nav class="mt-4" id="pagination"></nav>
+        </div>
+    </main>
+</div>
+
+<!-- Delete confirm modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog modal-sm modal-dialog-centered">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header border-0">
+                <h6 class="modal-title fw-bold"><i class="bi bi-trash text-danger me-2"></i>Delete Document</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body text-muted small">
+                This will permanently remove the document and all its indexed chunks. This action cannot be undone.
+            </div>
+            <div class="modal-footer border-0">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger btn-sm" id="confirmDeleteBtn">Delete</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script th:src="@{/js/app.js}"></script>
+<script>
+    const api = window.DocAI;
+    let currentPage = 0;
+    let pendingDeleteId = null;
+    const deleteModal = new bootstrap.Modal(document.getElementById('deleteModal'));
+
+    async function loadDocuments(page = 0) {
+        currentPage = page;
+        const search = document.getElementById('searchInput').value.trim();
+        const status = document.getElementById('statusFilter').value;
+        let url = `/api/documents?page=${page}&size=12`;
+        if (search) url += `&q=${encodeURIComponent(search)}`;
+        if (status) url += `&status=${status}`;
+
+        try {
+            const data = await api.get(url);
+            renderDocuments(data);
+        } catch(e) {
+            document.getElementById('docGrid').innerHTML = `<div class="col-12"><div class="alert alert-danger">Failed to load documents.</div></div>`;
+        }
+    }
+
+    function renderDocuments(data) {
+        const grid = document.getElementById('docGrid');
+        const docs = data.content || [];
+        document.getElementById('docCount').textContent = `${data.totalElements || 0} document${data.totalElements !== 1 ? 's' : ''}`;
+
+        if (docs.length === 0) {
+            grid.innerHTML = `<div class="col-12 text-center py-5 text-muted">
+            <i class="bi bi-file-earmark-plus display-4 mb-3 d-block opacity-40"></i>
+            <h6>No documents found</h6>
+            <p class="small mb-3">Upload a PDF to get started with AI-powered Q&A.</p>
+            <a href="/upload" class="btn btn-primary btn-sm"><i class="bi bi-cloud-upload me-1"></i>Upload PDF</a>
+        </div>`;
+            document.getElementById('pagination').innerHTML = '';
+            return;
+        }
+
+        grid.innerHTML = docs.map(d => `
+    <div class="col-md-6 col-xl-4">
+        <div class="card border-0 shadow-sm h-100 doc-card" data-id="${d.id}">
+            <div class="card-body">
+                <div class="d-flex align-items-start gap-3 mb-3">
+                    <div class="doc-icon-lg bg-danger-subtle text-danger rounded-3 flex-shrink-0">
+                        <i class="bi bi-file-earmark-pdf fs-3"></i>
+                    </div>
+                    <div class="flex-grow-1 overflow-hidden">
+                        <div class="fw-semibold text-truncate" title="${escHtml(d.originalName)}">${escHtml(d.originalName)}</div>
+                        <div class="text-muted small mt-1">${d.fileSizeFormatted ?? formatBytes(d.fileSize)}</div>
+                    </div>
+                </div>
+                <div class="d-flex flex-wrap gap-1 mb-3">
+                    ${statusBadge(d.status)}
+                    ${d.pageCount ? `<span class="badge bg-secondary-subtle text-secondary">${d.pageCount} pages</span>` : ''}
+                    ${d.chunkCount ? `<span class="badge bg-info-subtle text-info">${d.chunkCount} chunks</span>` : ''}
+                </div>
+                ${d.errorMessage ? `<div class="alert alert-danger py-1 px-2 small mb-2">${escHtml(d.errorMessage.substring(0,80))}</div>` : ''}
+                <div class="text-muted" style="font-size:.75rem">${d.title ? `<div class="text-truncate">${escHtml(d.title)}</div>` : ''}Uploaded ${formatDate(d.createdAt)}</div>
+            </div>
+            <div class="card-footer bg-transparent border-0 d-flex gap-1 pt-0">
+                <a href="/chat?docId=${d.id}" class="btn btn-sm btn-primary flex-grow-1">
+                    <i class="bi bi-chat-dots me-1"></i>Chat
+                </a>
+                ${d.status === 'FAILED' || d.status === 'COMPLETED' ? `
+                <button class="btn btn-sm btn-outline-secondary" onclick="reprocess('${d.id}')" title="Reprocess">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>` : ''}
+                <button class="btn btn-sm btn-outline-danger" onclick="confirmDelete('${d.id}')" title="Delete">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </div>
+        </div>
+    </div>`).join('');
+
+        // Pagination
+        renderPagination(data.number, data.totalPages);
+    }
+
+    function renderPagination(current, total) {
+        if (total <= 1) { document.getElementById('pagination').innerHTML = ''; return; }
+        let html = '<ul class="pagination pagination-sm justify-content-center">';
+        html += `<li class="page-item ${current === 0 ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="loadDocuments(${current-1})">‹</a></li>`;
+        for (let i = 0; i < total; i++) {
+            html += `<li class="page-item ${i === current ? 'active' : ''}">
+            <a class="page-link" href="#" onclick="loadDocuments(${i})">${i+1}</a></li>`;
+        }
+        html += `<li class="page-item ${current === total-1 ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="loadDocuments(${current+1})">›</a></li>`;
+        html += '</ul>';
+        document.getElementById('pagination').innerHTML = html;
+    }
+
+    async function reprocess(id) {
+        try {
+            await api.post(`/api/documents/${id}/reprocess`, {});
+            api.toast('Reprocessing started', 'info');
+            setTimeout(() => loadDocuments(currentPage), 1500);
+        } catch(e) { api.toast('Reprocess failed', 'danger'); }
+    }
+
+    function confirmDelete(id) {
+        pendingDeleteId = id;
+        deleteModal.show();
+    }
+
+    document.getElementById('confirmDeleteBtn').addEventListener('click', async () => {
+        if (!pendingDeleteId) return;
+        try {
+            await api.del(`/api/documents/${pendingDeleteId}`);
+            deleteModal.hide();
+            api.toast('Document deleted', 'success');
+            loadDocuments(currentPage);
+        } catch(e) { api.toast('Delete failed', 'danger'); }
+    });
+
+    // Search debounce
+    let searchTimer;
+    document.getElementById('searchInput').addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => loadDocuments(0), 400);
+    });
+    document.getElementById('statusFilter').addEventListener('change', () => loadDocuments(0));
+
+    // Poll for processing docs
+    setInterval(() => {
+        const processingCards = document.querySelectorAll('[data-status="PROCESSING"],[data-status="PENDING"]');
+        if (processingCards.length > 0) loadDocuments(currentPage);
+    }, 5000);
+
+    function statusBadge(s) {
+        const map = { COMPLETED:'success', PROCESSING:'warning', FAILED:'danger', PENDING:'secondary', REPROCESSING:'info' };
+        const icons = { COMPLETED:'check-circle', PROCESSING:'arrow-repeat', FAILED:'x-circle', PENDING:'clock', REPROCESSING:'arrow-clockwise' };
+        return `<span class="badge bg-${map[s]||'secondary'}-subtle text-${map[s]||'secondary'}">
+        <i class="bi bi-${icons[s]||'circle'} me-1"></i>${s}</span>`;
+    }
+
+    function formatBytes(b) {
+        if (!b) return '0 B';
+        if (b < 1024) return b + ' B';
+        if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+        return (b/1048576).toFixed(1) + ' MB';
+    }
+
+    function formatDate(iso) {
+        if (!iso) return '';
+        return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function escHtml(s) {
+        return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    loadDocuments();
+</script>
+</body>
+</html>

@@ -9,6 +9,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Repository
@@ -85,4 +86,8 @@ public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UU
     @Modifying
     @Query("UPDATE DocumentChunk dc SET dc.embedding = :embedding WHERE dc.id = :id")
     void updateEmbedding(@Param("id") UUID id, @Param("embedding") float[] embedding);
+
+    @Query("SELECT dc.document.id, COUNT(dc) FROM DocumentChunk dc " +
+            "WHERE dc.document.id IN :docIds GROUP BY dc.document.id")
+    Map<UUID, Long> countByDocumentIds(List<UUID> docIds);
 }

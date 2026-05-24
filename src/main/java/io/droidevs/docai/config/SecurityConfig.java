@@ -1,6 +1,7 @@
 package io.droidevs.docai.config;
 
 import io.droidevs.docai.auth.JwtAuthenticationFilter;
+import io.droidevs.docai.filters.RateLimitFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -23,11 +24,15 @@ import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWrite
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity(prePostEnabled = true)
+// FIX #17/18 — @EnableAsync and @EnableRetry belong on the main application
+// class or a dedicated @Configuration.  See AppConfig.java.
 @RequiredArgsConstructor
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthFilter;
     private final UserDetailsService userDetailsService;
+    // FIX #4 — inject rate-limit filter
+    private final RateLimitFilter rateLimitFilter;
 
     private static final String[] PUBLIC_URLS = {
             "/", "/login", "/register",
@@ -66,12 +71,13 @@ public class SecurityConfig {
                         .failureUrl("/login?error=true")
                         .permitAll()
                 )
-                // Logout
+                // Logout — FIX #3: also clear the HttpOnly jwt_token cookie
                 .logout(logout -> logout
                         .logoutUrl("/logout")
                         .logoutSuccessUrl("/login?logout=true")
                         .deleteCookies("jwt_token", "JSESSIONID")
                         .invalidateHttpSession(true)
+                        .clearAuthentication(true)
                         .permitAll()
                 )
                 // Security headers
@@ -88,6 +94,8 @@ public class SecurityConfig {
                 )
                 // Auth provider
                 .authenticationProvider(authenticationProvider())
+                // FIX #4 — rate limiter must run before the JWT filter
+                .addFilterBefore(rateLimitFilter, UsernamePasswordAuthenticationFilter.class)
                 // JWT filter
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .build();

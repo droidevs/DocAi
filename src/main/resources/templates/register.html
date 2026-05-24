@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Register — DocAI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+    <link th:href="@{/css/app.css}" rel="stylesheet"/>
+</head>
+<body class="auth-page d-flex align-items-center justify-content-center min-vh-100 py-4">
+
+<div class="auth-card card shadow-lg border-0" style="width: 460px; max-width: 95vw;">
+    <div class="card-body p-5">
+        <div class="text-center mb-4">
+            <i class="bi bi-robot text-primary" style="font-size: 2.5rem;"></i>
+            <h1 class="h3 fw-bold mt-2">Create account</h1>
+            <p class="text-muted small">Start using DocAI for free</p>
+        </div>
+
+        <div id="errorAlert" class="alert alert-danger py-2 small d-none" role="alert"></div>
+        <div id="successAlert" class="alert alert-success py-2 small d-none" role="alert"></div>
+
+        <form id="registerForm" novalidate>
+            <div class="row g-3 mb-3">
+                <div class="col-6">
+                    <label class="form-label fw-medium small">First Name</label>
+                    <input type="text" class="form-control" id="firstName" name="firstName"
+                           placeholder="John" maxlength="100"/>
+                </div>
+                <div class="col-6">
+                    <label class="form-label fw-medium small">Last Name</label>
+                    <input type="text" class="form-control" id="lastName" name="lastName"
+                           placeholder="Doe" maxlength="100"/>
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-medium small">Username <span class="text-danger">*</span></label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-person"></i></span>
+                    <input type="text" class="form-control" id="username" name="username"
+                           placeholder="johndoe" required minlength="3" maxlength="50"/>
+                </div>
+                <div class="form-text">3–50 characters</div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-medium small">Email <span class="text-danger">*</span></label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-envelope"></i></span>
+                    <input type="email" class="form-control" id="email" name="email"
+                           placeholder="john@example.com" required/>
+                </div>
+            </div>
+
+            <div class="mb-4">
+                <label class="form-label fw-medium small">Password <span class="text-danger">*</span></label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-lock"></i></span>
+                    <input type="password" class="form-control" id="password" name="password"
+                           placeholder="Min 8 characters" required minlength="8"/>
+                    <button class="btn btn-outline-secondary" type="button" id="togglePwd">
+                        <i class="bi bi-eye"></i>
+                    </button>
+                </div>
+                <div class="mt-2">
+                    <div class="progress" style="height:4px;">
+                        <div class="progress-bar" id="pwdStrength" style="width:0%"></div>
+                    </div>
+                    <span class="form-text" id="pwdStrengthLabel"></span>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary w-100 py-2 fw-semibold" id="submitBtn">
+                <i class="bi bi-person-plus me-2"></i>Create Account
+            </button>
+        </form>
+
+        <hr class="my-4"/>
+        <p class="text-center text-muted small mb-0">
+            Already have an account?
+            <a th:href="@{/login}" class="fw-semibold text-decoration-none">Sign in</a>
+        </p>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    const pwdInput = document.getElementById('password');
+    const pwdBar   = document.getElementById('pwdStrength');
+    const pwdLabel = document.getElementById('pwdStrengthLabel');
+
+    pwdInput.addEventListener('input', () => {
+        const v = pwdInput.value;
+        let score = 0;
+        if (v.length >= 8) score++;
+        if (/[A-Z]/.test(v)) score++;
+        if (/[0-9]/.test(v)) score++;
+        if (/[^A-Za-z0-9]/.test(v)) score++;
+        const levels = ['', 'Weak', 'Fair', 'Good', 'Strong'];
+        const colors = ['', 'danger', 'warning', 'info', 'success'];
+        pwdBar.style.width = (score * 25) + '%';
+        pwdBar.className = `progress-bar bg-${colors[score]}`;
+        pwdLabel.textContent = levels[score] ? `Password strength: ${levels[score]}` : '';
+    });
+
+    document.getElementById('togglePwd').addEventListener('click', () => {
+        const icon = document.querySelector('#togglePwd i');
+        pwdInput.type = pwdInput.type === 'password' ? 'text' : 'password';
+        icon.className = pwdInput.type === 'password' ? 'bi bi-eye' : 'bi bi-eye-slash';
+    });
+
+    document.getElementById('registerForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('submitBtn');
+        const errDiv = document.getElementById('errorAlert');
+        const okDiv  = document.getElementById('successAlert');
+        errDiv.classList.add('d-none');
+        okDiv.classList.add('d-none');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Creating…';
+
+        const payload = {
+            username:  document.getElementById('username').value.trim(),
+            email:     document.getElementById('email').value.trim(),
+            password:  document.getElementById('password').value,
+            firstName: document.getElementById('firstName').value.trim(),
+            lastName:  document.getElementById('lastName').value.trim(),
+        };
+
+        try {
+            const resp = await fetch('/api/auth/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                const msg = data.errors
+                    ? Object.values(data.errors).join(', ')
+                    : (data.detail || 'Registration failed');
+                errDiv.textContent = msg;
+                errDiv.classList.remove('d-none');
+            } else {
+                localStorage.setItem('jwt_token', data.accessToken);
+                okDiv.textContent = 'Account created! Redirecting…';
+                okDiv.classList.remove('d-none');
+                setTimeout(() => window.location.href = '/dashboard', 1000);
+            }
+        } catch (err) {
+            errDiv.textContent = 'Network error. Please try again.';
+            errDiv.classList.remove('d-none');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-person-plus me-2"></i>Create Account';
+        }
+    });
+</script>
+</body>
+</html>

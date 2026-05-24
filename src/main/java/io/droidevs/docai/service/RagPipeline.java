@@ -23,8 +23,7 @@ public class RagPipeline {
 
     private final EmbeddingService embeddingService;
     private final VectorSearchService vectorSearchService;
-    private final ChatClient.Builder builder;
-    private final ChatClient chatClient = builder.build();
+    private final ChatClient chatClient;
 
 
     @Value("${app.rag.top-k:5}")

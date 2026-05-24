@@ -11,10 +11,10 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.ragplatform</groupId>
-    <artifactId>rag-platform</artifactId>
+    <groupId>io.droidevs</groupId>
+    <artifactId>docai</artifactId>
     <version>1.0.0</version>
-    <name>RAG Platform</name>
+    <name>DocAI</name>
     <description>Production-grade AI Document Assistant with RAG</description>
 
     <properties>

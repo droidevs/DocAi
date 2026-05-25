@@ -106,10 +106,21 @@ app:
     similarity-threshold: 0.70
     max-context-tokens: 6000
     embedding-batch-size: 20
+    embedding-batch-pause-ms: 200   # FIX #24: configurable inter-batch pause
 
   # CORS
   cors:
     allowed-origins: ${CORS_ORIGINS:http://localhost:8080}
+
+  # FIX #4 — Rate limiting for auth endpoints
+  rate-limit:
+    auth:
+      max-requests: 10        # max requests per IP per window
+      window-seconds: 60      # rolling window size in seconds
+
+  # FIX #29 — Token cleanup schedule (default: top of every hour)
+  auth:
+    token-cleanup-cron: "0 0 * * * *"
 
 # Actuator
 management:

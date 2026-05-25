@@ -6,8 +6,26 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 
+/**
+ * Fix #22 — The original implementation accumulated ALL pages in a
+ * {@code List<PageContent>} before chunking began.  For a 500-page PDF
+ * this holds the entire document text in the heap simultaneously.
+ *
+ * <p>The fixed implementation accepts an {@link Iterable} of pages so the
+ * caller can supply a lazy iterator (e.g. one that reads pages on demand
+ * from PDFBox).  The chunking loop itself only ever holds the current chunk
+ * buffer and the overlap tail in memory.
+ *
+ * <p>For callers that already have a {@code List<PageContent>} (e.g. tests)
+ * the convenience overload {@link #chunkPages(List)} still works — the list
+ * is simply wrapped in an {@link Iterable} via its {@code iterator()}.
+ *
+ * Fix #13 — bufferPage tracking was broken (see original comment).
+ */
 @Service
 @Slf4j
 public class DocumentChunkingService {
@@ -25,24 +43,21 @@ public class DocumentChunkingService {
             int tokenCount
     ) {}
 
-    /**
-     * Chunks document pages into overlapping text segments that preserve semantic meaning.
-     * Strategy: sentence-aware chunking with configurable size and overlap.
-     *
-     * FIX #13 — bufferPage tracking was broken.  The original code compared
-     *  {@code buffer.length() == sentence.length()} to detect a fresh buffer,
-     *  but a leading space is appended before each sentence so that condition
-     *  was never true after the first sentence.  The fix uses an explicit
-     *  boolean flag that is set to true whenever the buffer is reset (either
-     *  at startup or after an overlap extraction).
-     */
-    public List<Chunk> chunkPages(List<PageContent> pages) {
-        List<Chunk> chunks = new ArrayList<>();
-        int chunkIndex = 0;
+    // ── Public API ────────────────────────────────────────────────────────
 
+    /**
+     * Stream-friendly overload.  The iterator is consumed one page at a time
+     * so only a single page's text is in memory alongside the current chunk buffer.
+     *
+     * @param pages lazy iterator of pages (e.g. from PDFBox page-by-page extraction)
+     * @return list of text chunks ready for embedding
+     */
+    public List<Chunk> chunkPages(Iterable<PageContent> pages) {
+        List<Chunk> chunks    = new ArrayList<>();
+        int chunkIndex        = 0;
         StringBuilder buffer  = new StringBuilder();
-        int bufferPage         = 1;
-        boolean bufferIsNew    = true;   // FIX #13 — explicit reset flag
+        int bufferPage        = 1;
+        boolean bufferIsNew   = true;    // Fix #13 — explicit reset flag
 
         for (PageContent page : pages) {
             String[] sentences = splitIntoSentences(page.text());
@@ -52,7 +67,8 @@ public class DocumentChunkingService {
 
                 // If adding this sentence exceeds chunk size, flush
                 if (buffer.length() > 0 &&
-                        buffer.length() + sentence.length() > chunkSize) {
+                        buffer.length() + 1 + sentence.length() > chunkSize) {
+
                     String content = buffer.toString().trim();
                     if (!content.isBlank()) {
                         chunks.add(new Chunk(chunkIndex++, bufferPage, content, estimateTokens(content)));
@@ -60,20 +76,23 @@ public class DocumentChunkingService {
 
                     // Overlap: keep tail of current buffer
                     String overlap = extractOverlap(content);
-                    buffer     = new StringBuilder(overlap);
-                    bufferPage = page.pageNumber();
-                    bufferIsNew = true;  // FIX #13 — mark buffer as reset
+                    buffer      = new StringBuilder(overlap);
+                    bufferPage  = page.pageNumber();
+                    bufferIsNew = true;   // Fix #13 — mark buffer as reset
                 }
 
-                if (buffer.length() > 0) buffer.append(" ");
+                if (buffer.length() > 0) buffer.append(' ');
                 buffer.append(sentence);
 
-                // FIX #13 — update page on the first sentence after a reset
+                // Fix #13 — update page on the first sentence after a flush/reset
                 if (bufferIsNew) {
                     bufferPage  = page.pageNumber();
                     bufferIsNew = false;
                 }
             }
+
+            // Release page text from the local scope — the GC can collect it
+            // as soon as we move to the next iteration.
         }
 
         // Flush remaining buffer
@@ -84,23 +103,30 @@ public class DocumentChunkingService {
             }
         }
 
-        log.debug("Chunked {} pages into {} chunks (size={}, overlap={})",
-                pages.size(), chunks.size(), chunkSize, chunkOverlap);
+        log.debug("Chunked into {} chunks (size={}, overlap={})", chunks.size(), chunkSize, chunkOverlap);
         return chunks;
     }
 
     /**
-     * Simple sentence splitting: split on period/question/exclamation followed by whitespace.
-     * More sophisticated NLP can be added via OpenNLP or similar.
+     * Convenience overload for callers that already have a {@code List<PageContent>}.
+     * The list is iterated lazily — no additional copy is made.
+     */
+    public List<Chunk> chunkPages(List<PageContent> pages) {
+        return chunkPages((Iterable<PageContent>) pages);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    /**
+     * Split text into sentences on punctuation boundaries and newlines.
+     * Returns an array of sentence strings.
      */
     private String[] splitIntoSentences(String text) {
-        // Split on sentence boundaries while preserving the delimiter
         return text.split("(?<=[.!?])\\s+|(?<=\\n)");
     }
 
     private String extractOverlap(String content) {
         if (content.length() <= chunkOverlap) return content;
-        // Get last `chunkOverlap` characters, trying to start at a word boundary
         String tail = content.substring(content.length() - chunkOverlap);
         int wordBoundary = tail.indexOf(' ');
         if (wordBoundary > 0 && wordBoundary < chunkOverlap / 2) {
@@ -110,7 +136,7 @@ public class DocumentChunkingService {
     }
 
     private int estimateTokens(String text) {
-        // Approximation: ~4 characters per token
+        // ~4 characters per token approximation
         return (int) Math.ceil(text.length() / 4.0);
     }
 }

@@ -28,13 +28,21 @@ public class DocumentChunkingService {
     /**
      * Chunks document pages into overlapping text segments that preserve semantic meaning.
      * Strategy: sentence-aware chunking with configurable size and overlap.
+     *
+     * FIX #13 — bufferPage tracking was broken.  The original code compared
+     *  {@code buffer.length() == sentence.length()} to detect a fresh buffer,
+     *  but a leading space is appended before each sentence so that condition
+     *  was never true after the first sentence.  The fix uses an explicit
+     *  boolean flag that is set to true whenever the buffer is reset (either
+     *  at startup or after an overlap extraction).
      */
     public List<Chunk> chunkPages(List<PageContent> pages) {
         List<Chunk> chunks = new ArrayList<>();
         int chunkIndex = 0;
 
-        StringBuilder buffer = new StringBuilder();
-        int bufferPage = 1;
+        StringBuilder buffer  = new StringBuilder();
+        int bufferPage         = 1;
+        boolean bufferIsNew    = true;   // FIX #13 — explicit reset flag
 
         for (PageContent page : pages) {
             String[] sentences = splitIntoSentences(page.text());
@@ -52,16 +60,18 @@ public class DocumentChunkingService {
 
                     // Overlap: keep tail of current buffer
                     String overlap = extractOverlap(content);
-                    buffer = new StringBuilder(overlap);
+                    buffer     = new StringBuilder(overlap);
                     bufferPage = page.pageNumber();
+                    bufferIsNew = true;  // FIX #13 — mark buffer as reset
                 }
 
                 if (buffer.length() > 0) buffer.append(" ");
                 buffer.append(sentence);
 
-                // Track which page the buffer started from
-                if (buffer.length() == sentence.length()) {
-                    bufferPage = page.pageNumber();
+                // FIX #13 — update page on the first sentence after a reset
+                if (bufferIsNew) {
+                    bufferPage  = page.pageNumber();
+                    bufferIsNew = false;
                 }
             }
         }

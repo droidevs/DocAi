@@ -6,6 +6,9 @@ import io.droidevs.docai.repository.DocumentChunkRepository;
 import io.droidevs.docai.repository.DocumentRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -15,9 +18,9 @@ import java.io.FileInputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class DocumentProcessingService {
 
@@ -28,14 +31,46 @@ public class DocumentProcessingService {
     private final DocumentChunkRepository chunkRepository;
 
     /**
+     * FIX #9 — self-reference via @Lazy so Spring's AOP proxy is used.
+     *
+     * When processAsync calls processDocument on `this` directly it bypasses
+     * the proxy, so @Transactional(REQUIRES_NEW) has no effect.  Injecting
+     * the bean's own proxy via @Lazy breaks the circular dependency and
+     * ensures the transaction annotation is honoured.
+     */
+    private DocumentProcessingService self;
+
+    // Primary constructor for all non-self dependencies (used by Spring)
+    public DocumentProcessingService(PdfExtractionService pdfExtractionService,
+                                     DocumentChunkingService chunkingService,
+                                     EmbeddingService embeddingService,
+                                     DocumentRepository documentRepository,
+                                     DocumentChunkRepository chunkRepository) {
+        this.pdfExtractionService = pdfExtractionService;
+        this.chunkingService      = chunkingService;
+        this.embeddingService     = embeddingService;
+        this.documentRepository   = documentRepository;
+        this.chunkRepository      = chunkRepository;
+    }
+
+    /** Setter injection for the self-reference to avoid circular dependency issues. */
+    @Autowired
+    public void setSelf(@Lazy DocumentProcessingService self) {
+        this.self = self;
+    }
+
+    // ── Public API ────────────────────────────────────────────────────────
+
+    /**
      * Asynchronous entry point — called after document upload.
+     * FIX #18 — @Async works because @EnableAsync is now on AppConfig.
      */
     @Async
-    @Transactional
     public void processAsync(Document document) {
         log.info("Starting async processing for document: {}", document.getId());
         try {
-            processDocument(document.getId());
+            // FIX #9 — call via self (the proxy) so @Transactional(REQUIRES_NEW) fires
+            self.processDocument(document.getId());
         } catch (Exception e) {
             log.error("Async processing failed for document {}: {}", document.getId(), e.getMessage(), e);
         }
@@ -46,7 +81,7 @@ public class DocumentProcessingService {
      * Runs in a new transaction to isolate failures.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void processDocument(java.util.UUID documentId) {
+    public void processDocument(UUID documentId) {
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new RuntimeException("Document not found: " + documentId));
 
@@ -121,17 +156,17 @@ public class DocumentProcessingService {
      * Reprocess: delete existing chunks and re-run full pipeline.
      */
     @Transactional
-    public void reprocess(java.util.UUID documentId, java.util.UUID userId) {
+    public void reprocess(UUID documentId, UUID userId) {
         Document document = documentRepository.findByIdAndUserId(documentId, userId)
                 .orElseThrow(() -> new RuntimeException("Document not found or access denied"));
 
-        // Delete existing chunks
         chunkRepository.deleteByDocumentId(documentId);
 
         document.setStatus(Document.ProcessingStatus.REPROCESSING);
         documentRepository.save(document);
 
-        processAsync(document);
+        // FIX #9 — call via self so the @Async proxy fires correctly
+        self.processAsync(document);
     }
 
     private String truncate(String s, int maxLen) {

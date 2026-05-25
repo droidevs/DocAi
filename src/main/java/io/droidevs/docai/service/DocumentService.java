@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -27,7 +28,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -52,18 +55,24 @@ public class DocumentService {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
-        // Compute SHA-256 for duplicate detection
-        String hash = computeSha256(file.getInputStream());
-        if (documentRepository.existsByUserIdAndSha256Hash(user.getId(), hash)) {
-            throw new DuplicateDocumentException("This document has already been uploaded");
-        }
+        // FIX #2 — sanitize filename BEFORE building the path
+        String safeFilename = sanitizeFilename(file.getOriginalFilename());
+        String storedName   = UUID.randomUUID() + "_" + safeFilename;
 
-        // Generate unique filename and store the file
-        String storedName = UUID.randomUUID() + "_" + sanitizeFilename(file.getOriginalFilename());
         Path uploadPath = Paths.get(uploadDir);
         Files.createDirectories(uploadPath);
         Path filePath = uploadPath.resolve(storedName);
+
+        // FIX #5 — write to disk first, then hash the file on disk.
+        // This avoids reading the same InputStream twice (second read would yield 0 bytes).
         Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+
+        String hash = computeSha256(filePath);
+        if (documentRepository.existsByUserIdAndSha256Hash(user.getId(), hash)) {
+            // Clean up the file we just wrote before throwing
+            Files.deleteIfExists(filePath);
+            throw new DuplicateDocumentException("This document has already been uploaded");
+        }
 
         // Persist document record
         Document document = Document.builder()
@@ -91,8 +100,17 @@ public class DocumentService {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
-        return documentRepository.findByUserId(user.getId(), pageable)
-                .map(this::toResponse);
+        Page<Document> page = documentRepository.findByUserId(user.getId(), pageable);
+
+        // FIX #21 — batch-fetch chunk counts for the whole page in ONE query
+        // instead of one COUNT query per document (N+1).
+        List<UUID> docIds = page.getContent().stream()
+                .map(Document::getId)
+                .collect(Collectors.toList());
+        Map<UUID, Long> chunkCounts = chunkRepository.countByDocumentIds(docIds);
+
+        return page.map(doc ->
+                toResponse(doc, chunkCounts.getOrDefault(doc.getId(), 0L)));
     }
 
     @Transactional(readOnly = true)
@@ -103,7 +121,7 @@ public class DocumentService {
         Document doc = documentRepository.findByIdAndUserId(documentId, user.getId())
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
 
-        return toResponse(doc);
+        return toResponse(doc, chunkRepository.countByDocumentId(doc.getId()));
     }
 
     @Transactional
@@ -147,8 +165,12 @@ public class DocumentService {
         }
     }
 
-    private String computeSha256(InputStream is) {
-        try {
+    /**
+     * FIX #3 — compute SHA-256 from a Path (file already on disk).
+     * Accepts a Path so we never read the same InputStream twice.
+     */
+    private String computeSha256(Path filePath) {
+        try (InputStream is = Files.newInputStream(filePath)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[8192];
             int read;
@@ -161,12 +183,24 @@ public class DocumentService {
         }
     }
 
+    /**
+     * FIX #2 — strip directory components to prevent path traversal.
+     * e.g. "../../etc/passwd.pdf" → "passwd.pdf"
+     * Then replace any remaining unsafe characters.
+     */
     private String sanitizeFilename(String filename) {
-        if (filename == null) return "document.pdf";
-        return filename.replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (filename == null || filename.isBlank()) return "document.pdf";
+        // Strip directory components using Paths — OS-independent
+        String base = Paths.get(filename).getFileName().toString();
+        // Replace everything except alphanumeric, dot, hyphen, underscore
+        base = base.replaceAll("[^a-zA-Z0-9._-]", "_");
+        // Avoid hidden files or names that start with a dot
+        if (base.startsWith(".")) base = "_" + base;
+        return base.isEmpty() ? "document.pdf" : base;
     }
 
-    private DocumentResponse toResponse(Document doc) {
+    /** Single-document toResponse — used by getDocument(). */
+    private DocumentResponse toResponse(Document doc, long chunkCount) {
         return DocumentResponse.builder()
                 .id(doc.getId())
                 .originalName(doc.getOriginalName())
@@ -176,7 +210,7 @@ public class DocumentService {
                 .errorMessage(doc.getErrorMessage())
                 .title(doc.getTitle())
                 .author(doc.getAuthor())
-                .chunkCount(chunkRepository.countByDocumentId(doc.getId()))
+                .chunkCount(chunkCount)
                 .createdAt(doc.getCreatedAt())
                 .updatedAt(doc.getUpdatedAt())
                 .build();

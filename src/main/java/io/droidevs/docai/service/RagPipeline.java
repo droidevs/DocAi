@@ -25,7 +25,6 @@ public class RagPipeline {
     private final VectorSearchService vectorSearchService;
     private final ChatClient chatClient;
 
-
     @Value("${app.rag.top-k:5}")
     private int topK;
 
@@ -37,14 +36,14 @@ public class RagPipeline {
 
     private static final String SYSTEM_PROMPT = """
         You are a precise document assistant. Your role is to answer questions using ONLY the information provided in the document excerpts below.
-
+ 
         Rules:
         1. Answer ONLY based on the provided context. Do not use external knowledge.
         2. If the context does not contain enough information to answer the question, say: "I don't have enough information in the uploaded documents to answer this question."
         3. Always cite your sources by referencing the document name and page number.
         4. Be concise and accurate.
         5. Do not hallucinate or invent information.
-
+ 
         Document Context:
         ---
         {context}
@@ -188,15 +187,67 @@ public class RagPipeline {
         }).collect(Collectors.toList());
     }
 
+    // ── Prompt injection patterns ────────────────────────────────────────
+    // Case-insensitive patterns covering the most common injection vectors.
+    private static final List<java.util.regex.Pattern> INJECTION_PATTERNS = List.of(
+            java.util.regex.Pattern.compile("ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions?|prompts?|rules?|context)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("disregard\\s+(all\\s+)?(previous|prior|above)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("forget\\s+(everything|all|your\\s+instructions?)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("you\\s+are\\s+now\\s+(a|an|DAN|jailbreak)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("act\\s+as\\s+(if\\s+you\\s+are|a|an)\\s+(?!document)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("pretend\\s+(you\\s+are|to\\s+be)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("(system\\s*:\\s*|<\\s*system\\s*>)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("jailbreak", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("DAN\\s+mode", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("override\\s+(your\\s+)?(instructions?|programming|rules?)", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("new\\s+(instructions?|directives?|rules?)\\s*:", java.util.regex.Pattern.CASE_INSENSITIVE),
+            java.util.regex.Pattern.compile("---+\\s*(instructions?|system|prompt)\\s*---+", java.util.regex.Pattern.CASE_INSENSITIVE)
+    );
+
     /**
-     * Basic prompt injection guard: strip special characters used in prompt manipulation.
+     * Robust prompt injection guard.
+     *
+     * <p>Strategy (defence-in-depth):
+     * <ol>
+     *   <li>Null / empty check.</li>
+     *   <li>Length cap — rejects inputs that are implausibly long for a question.</li>
+     *   <li>Pattern matching against a curated list of known injection vectors.
+     *       Matched segments are replaced with [REMOVED] so the question still makes
+     *       partial sense for logging / audit, rather than silently disappearing.</li>
+     *   <li>Strip angle-bracket tags that could smuggle pseudo-XML role markers.</li>
+     *   <li>Collapse excessive whitespace produced by the replacements above.</li>
+     * </ol>
+     *
+     * <p>Note: this is a best-effort, defence-in-depth layer. The system prompt
+     * already constrains the model to answer only from context, which is the primary
+     * guard. This layer prevents the most blatant injection attempts from ever
+     * reaching the model at all.
      */
     private String sanitizeInput(String input) {
         if (input == null) return "";
-        return input
-                .replace("Ignore previous instructions", "")
-                .replace("ignore all previous", "")
-                .replaceAll("[<>{}\\[\\]]", "")
-                .trim();
+
+        // 1. Hard length cap (configurable via constant — 2 000 chars ≈ ~500 tokens)
+        final int MAX_INPUT_LENGTH = 2000;
+        String sanitized = input.length() > MAX_INPUT_LENGTH
+                ? input.substring(0, MAX_INPUT_LENGTH)
+                : input;
+
+        // 2. Pattern-based injection removal
+        for (java.util.regex.Pattern p : INJECTION_PATTERNS) {
+            sanitized = p.matcher(sanitized).replaceAll("[REMOVED]");
+        }
+
+        // 3. Strip HTML/XML-style tags that could inject role markers
+        sanitized = sanitized.replaceAll("<[^>]{0,100}>", "");
+
+        // 4. Collapse whitespace artefacts left by replacements
+        sanitized = sanitized.replaceAll("\\s{3,}", "  ").trim();
+
+        if (!sanitized.equals(input.trim())) {
+            log.warn("Potential prompt injection detected and sanitized. Original length={}, " +
+                    "sanitized length={}", input.length(), sanitized.length());
+        }
+
+        return sanitized;
     }
 }

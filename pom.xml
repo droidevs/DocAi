@@ -25,6 +25,8 @@
         <mapstruct.version>1.6.2</mapstruct.version>
         <lombok.version>1.18.34</lombok.version>
         <testcontainers.version>1.20.3</testcontainers.version>
+        <!-- Fix #23 — accurate OpenAI-compatible tokenizer -->
+        <jtokkit.version>1.1.0</jtokkit.version>
     </properties>
 
     <dependencyManagement>
@@ -73,6 +75,7 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-cache</artifactId>
         </dependency>
+        <!-- Fix #20 — WebSocket was in pom but had no configuration; now wired up -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-websocket</artifactId>
@@ -127,6 +130,17 @@
             <groupId>org.apache.pdfbox</groupId>
             <artifactId>pdfbox</artifactId>
             <version>${pdfbox.version}</version>
+        </dependency>
+
+        <!--
+            Fix #23 — Accurate OpenAI-compatible tokenizer (cl100k_base / o200k_base).
+            Replaces the character-length/4 heuristic in RagPipeline.buildContext().
+            See: https://github.com/knuddelsgmbh/jtokkit
+        -->
+        <dependency>
+            <groupId>com.knuddels</groupId>
+            <artifactId>jtokkit</artifactId>
+            <version>${jtokkit.version}</version>
         </dependency>
 
         <!-- Utilities -->

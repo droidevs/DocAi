@@ -1,6 +1,5 @@
 package io.droidevs.docai.repository;
 
-
 import io.droidevs.docai.entity.DocumentChunk;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -11,6 +10,7 @@ import org.springframework.stereotype.Repository;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Repository
 public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UUID> {
@@ -20,6 +20,32 @@ public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UU
     void deleteByDocumentId(UUID documentId);
 
     long countByDocumentId(UUID documentId);
+
+    /**
+     * FIX #21 — batch COUNT query.
+     *
+     * Returns a list of [documentId, count] pairs for all supplied IDs in a
+     * single query, avoiding N+1 individual COUNT calls when rendering a page
+     * of document cards.
+     *
+     * Usage:
+     * <pre>
+     *   Map&lt;UUID, Long&gt; counts = chunkRepository.countByDocumentIds(docIds);
+     *   long n = counts.getOrDefault(doc.getId(), 0L);
+     * </pre>
+     */
+    @Query("SELECT dc.document.id, COUNT(dc) FROM DocumentChunk dc " +
+            "WHERE dc.document.id IN :ids GROUP BY dc.document.id")
+    List<Object[]> countByDocumentIdsRaw(@Param("ids") List<UUID> ids);
+
+    default Map<UUID, Long> countByDocumentIds(List<UUID> ids) {
+        if (ids == null || ids.isEmpty()) return Map.of();
+        return countByDocumentIdsRaw(ids).stream()
+                .collect(Collectors.toMap(
+                        row -> (UUID)   row[0],
+                        row -> (Long)   row[1]
+                ));
+    }
 
     /**
      * Vector similarity search across all user documents using cosine similarity.
@@ -86,8 +112,4 @@ public interface DocumentChunkRepository extends JpaRepository<DocumentChunk, UU
     @Modifying
     @Query("UPDATE DocumentChunk dc SET dc.embedding = :embedding WHERE dc.id = :id")
     void updateEmbedding(@Param("id") UUID id, @Param("embedding") float[] embedding);
-
-    @Query("SELECT dc.document.id, COUNT(dc) FROM DocumentChunk dc " +
-            "WHERE dc.document.id IN :docIds GROUP BY dc.document.id")
-    Map<UUID, Long> countByDocumentIds(List<UUID> docIds);
 }

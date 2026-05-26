@@ -41,15 +41,41 @@ public class DocumentController {
         return ResponseEntity.ok(response);
     }
 
+    /**
+     * FIX #36 — The previous implementation accepted only {@code page} and
+     * {@code size} parameters, silently ignoring {@code q} (free-text search)
+     * and {@code status} (processing-status filter) that every caller in
+     * {@code documents.html} sends.
+     *
+     * <p>Both parameters are optional:
+     * <ul>
+     *   <li>{@code q}      — delegates to {@link DocumentService#searchUserDocuments}</li>
+     *   <li>{@code status} — delegates to {@link DocumentService#getUserDocumentsByStatus}</li>
+     *   <li>neither        — delegates to {@link DocumentService#getUserDocuments} (unchanged)</li>
+     * </ul>
+     */
     @GetMapping
     public ResponseEntity<Page<DocumentResponse>> list(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false) String status,
             @AuthenticationPrincipal UserDetails user) {
 
-        Page<DocumentResponse> docs = documentService.getUserDocuments(
-                user.getUsername(),
-                PageRequest.of(page, size, Sort.by("createdAt").descending()));
+        PageRequest pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
+        Page<DocumentResponse> docs;
+
+        if (q != null && !q.isBlank()) {
+            docs = documentService.searchUserDocuments(user.getUsername(), q.trim(), pageable);
+        } else if (status != null && !status.isBlank()) {
+            Document.ProcessingStatus processingStatus =
+                    Document.ProcessingStatus.valueOf(status.toUpperCase());
+            docs = documentService.getUserDocumentsByStatus(
+                    user.getUsername(), processingStatus, pageable);
+        } else {
+            docs = documentService.getUserDocuments(user.getUsername(), pageable);
+        }
+
         return ResponseEntity.ok(docs);
     }
 

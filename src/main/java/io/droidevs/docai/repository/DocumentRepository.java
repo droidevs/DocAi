@@ -17,6 +17,11 @@ public interface DocumentRepository extends JpaRepository<Document, UUID> {
 
     Page<Document> findByUserId(UUID userId, Pageable pageable);
 
+    /** FIX #36 — Pageable overload used by DocumentService.getUserDocumentsByStatus(). */
+    Page<Document> findByUserIdAndStatus(UUID userId, Document.ProcessingStatus status,
+                                         Pageable pageable);
+
+    /** Non-pageable variant kept for internal pipeline queries (reprocess, etc.). */
     List<Document> findByUserIdAndStatus(UUID userId, Document.ProcessingStatus status);
 
     Optional<Document> findByIdAndUserId(UUID id, UUID userId);

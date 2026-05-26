@@ -13,7 +13,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -55,7 +54,6 @@ public class DocumentService {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
-        // FIX #2 — sanitize filename BEFORE building the path
         String safeFilename = sanitizeFilename(file.getOriginalFilename());
         String storedName   = UUID.randomUUID() + "_" + safeFilename;
 
@@ -63,18 +61,14 @@ public class DocumentService {
         Files.createDirectories(uploadPath);
         Path filePath = uploadPath.resolve(storedName);
 
-        // FIX #5 — write to disk first, then hash the file on disk.
-        // This avoids reading the same InputStream twice (second read would yield 0 bytes).
         Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
 
         String hash = computeSha256(filePath);
         if (documentRepository.existsByUserIdAndSha256Hash(user.getId(), hash)) {
-            // Clean up the file we just wrote before throwing
             Files.deleteIfExists(filePath);
             throw new DuplicateDocumentException("This document has already been uploaded");
         }
 
-        // Persist document record
         Document document = Document.builder()
                 .user(user)
                 .originalName(file.getOriginalFilename())
@@ -89,7 +83,6 @@ public class DocumentService {
         document = documentRepository.save(document);
         log.info("Document uploaded: {} by user: {}", document.getId(), username);
 
-        // Trigger async processing
         processingService.processAsync(document);
 
         return document;
@@ -101,9 +94,47 @@ public class DocumentService {
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         Page<Document> page = documentRepository.findByUserId(user.getId(), pageable);
+        return page.map(doc ->
+                toResponse(doc, getChunkCount(page.getContent(), doc.getId())));
+    }
 
-        // FIX #21 — batch-fetch chunk counts for the whole page in ONE query
-        // instead of one COUNT query per document (N+1).
+    /**
+     * FIX #36 — Free-text search across originalName and title.
+     * Delegates to {@code DocumentRepository.searchByUserIdAndQuery}.
+     */
+    @Transactional(readOnly = true)
+    public Page<DocumentResponse> searchUserDocuments(String username, String query,
+                                                      Pageable pageable) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+
+        Page<Document> page = documentRepository.searchByUserIdAndQuery(
+                user.getId(), query, pageable);
+
+        List<UUID> docIds = page.getContent().stream()
+                .map(Document::getId)
+                .collect(Collectors.toList());
+        Map<UUID, Long> chunkCounts = chunkRepository.countByDocumentIds(docIds);
+
+        return page.map(doc ->
+                toResponse(doc, chunkCounts.getOrDefault(doc.getId(), 0L)));
+    }
+
+    /**
+     * FIX #36 — Filter by processing status.
+     * Delegates to {@code DocumentRepository.findByUserIdAndStatus}.
+     */
+    @Transactional(readOnly = true)
+    public Page<DocumentResponse> getUserDocumentsByStatus(String username,
+                                                           Document.ProcessingStatus status,
+                                                           Pageable pageable) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+
+        // findByUserIdAndStatus returns List; wrap in a Page via the pageable query
+        Page<Document> page = documentRepository.findByUserIdAndStatus(
+                user.getId(), status, pageable);
+
         List<UUID> docIds = page.getContent().stream()
                 .map(Document::getId)
                 .collect(Collectors.toList());
@@ -132,7 +163,6 @@ public class DocumentService {
         Document document = documentRepository.findByIdAndUserId(documentId, user.getId())
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found"));
 
-        // Delete physical file
         try {
             Files.deleteIfExists(Paths.get(document.getFilePath()));
         } catch (IOException e) {
@@ -151,6 +181,8 @@ public class DocumentService {
         processingService.reprocess(documentId, user.getId());
     }
 
+    // ── Private helpers ────────────────────────────────────────────────────
+
     private void validateFile(MultipartFile file) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("File cannot be empty");
@@ -165,10 +197,6 @@ public class DocumentService {
         }
     }
 
-    /**
-     * FIX #3 — compute SHA-256 from a Path (file already on disk).
-     * Accepts a Path so we never read the same InputStream twice.
-     */
     private String computeSha256(Path filePath) {
         try (InputStream is = Files.newInputStream(filePath)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -183,23 +211,20 @@ public class DocumentService {
         }
     }
 
-    /**
-     * FIX #2 — strip directory components to prevent path traversal.
-     * e.g. "../../etc/passwd.pdf" → "passwd.pdf"
-     * Then replace any remaining unsafe characters.
-     */
     private String sanitizeFilename(String filename) {
         if (filename == null || filename.isBlank()) return "document.pdf";
-        // Strip directory components using Paths — OS-independent
         String base = Paths.get(filename).getFileName().toString();
-        // Replace everything except alphanumeric, dot, hyphen, underscore
         base = base.replaceAll("[^a-zA-Z0-9._-]", "_");
-        // Avoid hidden files or names that start with a dot
         if (base.startsWith(".")) base = "_" + base;
         return base.isEmpty() ? "document.pdf" : base;
     }
 
-    /** Single-document toResponse — used by getDocument(). */
+    /** Batch-fetch chunk counts to avoid N+1 then look up the given docId. */
+    private long getChunkCount(List<Document> pageDocs, UUID docId) {
+        List<UUID> ids = pageDocs.stream().map(Document::getId).collect(Collectors.toList());
+        return chunkRepository.countByDocumentIds(ids).getOrDefault(docId, 0L);
+    }
+
     private DocumentResponse toResponse(Document doc, long chunkCount) {
         return DocumentResponse.builder()
                 .id(doc.getId())

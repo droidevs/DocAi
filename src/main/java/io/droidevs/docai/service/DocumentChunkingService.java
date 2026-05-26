@@ -1,32 +1,34 @@
 package io.droidevs.docai.service;
 
 import io.droidevs.docai.service.PdfExtractionService.PageContent;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
 
 /**
- * Fix #22 — The original implementation accumulated ALL pages in a
- * {@code List<PageContent>} before chunking began.  For a 500-page PDF
- * this holds the entire document text in the heap simultaneously.
+ * FIX #37 — {estimateTokens(String)} previously used the crude
+ * {@code Math.ceil(content.length() / 4.0)} heuristic for the
+ * {@code token_count} column, even after {@link TokenizerService} was
+ * introduced in Fix #23 to provide accurate cl100k_base token counts.
  *
- * <p>The fixed implementation accepts an {@link Iterable} of pages so the
- * caller can supply a lazy iterator (e.g. one that reads pages on demand
- * from PDFBox).  The chunking loop itself only ever holds the current chunk
- * buffer and the overlap tail in memory.
+ * <p>Inaccurate counts propagate into the {@code document_chunks} table,
+ * making analytics and any future context-window budgeting unreliable.
+ * {@code TokenizerService} is now injected and used for every chunk.
  *
- * <p>For callers that already have a {@code List<PageContent>} (e.g. tests)
- * the convenience overload {@link #chunkPages(List)} still works — the list
- * is simply wrapped in an {@link Iterable} via its {@code iterator()}.
+ * <p>Note: {@code DocumentChunk.estimateTokenCount()} (the entity helper)
+ * also uses the char/4 heuristic, but it is only called from legacy
+ * paths — not from this service — so it can be updated separately.
  *
- * Fix #13 — bufferPage tracking was broken (see original comment).
+ * Other fixes preserved from earlier revisions:
+ * Fix #22 — lazy Iterable overload keeps memory footprint O(1) per page.
+ * Fix #13 — bufferPage tracking corrected with explicit reset flag.
  */
 @Service
+@RequiredArgsConstructor
 @Slf4j
 public class DocumentChunkingService {
 
@@ -35,6 +37,9 @@ public class DocumentChunkingService {
 
     @Value("${app.rag.chunk-overlap:150}")
     private int chunkOverlap;
+
+    /** FIX #37 — injected for accurate token counting. */
+    private final TokenizerService tokenizerService;
 
     public record Chunk(
             int chunkIndex,
@@ -45,19 +50,12 @@ public class DocumentChunkingService {
 
     // ── Public API ────────────────────────────────────────────────────────
 
-    /**
-     * Stream-friendly overload.  The iterator is consumed one page at a time
-     * so only a single page's text is in memory alongside the current chunk buffer.
-     *
-     * @param pages lazy iterator of pages (e.g. from PDFBox page-by-page extraction)
-     * @return list of text chunks ready for embedding
-     */
     public List<Chunk> chunkPages(Iterable<PageContent> pages) {
-        List<Chunk> chunks    = new ArrayList<>();
-        int chunkIndex        = 0;
-        StringBuilder buffer  = new StringBuilder();
-        int bufferPage        = 1;
-        boolean bufferIsNew   = true;    // Fix #13 — explicit reset flag
+        List<Chunk> chunks   = new ArrayList<>();
+        int chunkIndex       = 0;
+        StringBuilder buffer = new StringBuilder();
+        int bufferPage       = 1;
+        boolean bufferIsNew  = true;
 
         for (PageContent page : pages) {
             String[] sentences = splitIntoSentences(page.text());
@@ -65,62 +63,50 @@ public class DocumentChunkingService {
             for (String sentence : sentences) {
                 if (sentence.isBlank()) continue;
 
-                // If adding this sentence exceeds chunk size, flush
                 if (buffer.length() > 0 &&
                         buffer.length() + 1 + sentence.length() > chunkSize) {
 
                     String content = buffer.toString().trim();
                     if (!content.isBlank()) {
-                        chunks.add(new Chunk(chunkIndex++, bufferPage, content, estimateTokens(content)));
+                        chunks.add(new Chunk(chunkIndex++, bufferPage,
+                                content, countTokens(content)));   // FIX #34
                     }
 
-                    // Overlap: keep tail of current buffer
                     String overlap = extractOverlap(content);
                     buffer      = new StringBuilder(overlap);
                     bufferPage  = page.pageNumber();
-                    bufferIsNew = true;   // Fix #13 — mark buffer as reset
+                    bufferIsNew = true;
                 }
 
                 if (buffer.length() > 0) buffer.append(' ');
                 buffer.append(sentence);
 
-                // Fix #13 — update page on the first sentence after a flush/reset
                 if (bufferIsNew) {
                     bufferPage  = page.pageNumber();
                     bufferIsNew = false;
                 }
             }
-
-            // Release page text from the local scope — the GC can collect it
-            // as soon as we move to the next iteration.
         }
 
-        // Flush remaining buffer
         if (buffer.length() > 0) {
             String content = buffer.toString().trim();
             if (!content.isBlank()) {
-                chunks.add(new Chunk(chunkIndex, bufferPage, content, estimateTokens(content)));
+                chunks.add(new Chunk(chunkIndex, bufferPage,
+                        content, countTokens(content)));   // FIX #34
             }
         }
 
-        log.debug("Chunked into {} chunks (size={}, overlap={})", chunks.size(), chunkSize, chunkOverlap);
+        log.debug("Chunked into {} chunks (size={}, overlap={})",
+                chunks.size(), chunkSize, chunkOverlap);
         return chunks;
     }
 
-    /**
-     * Convenience overload for callers that already have a {@code List<PageContent>}.
-     * The list is iterated lazily — no additional copy is made.
-     */
     public List<Chunk> chunkPages(List<PageContent> pages) {
         return chunkPages((Iterable<PageContent>) pages);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    /**
-     * Split text into sentences on punctuation boundaries and newlines.
-     * Returns an array of sentence strings.
-     */
     private String[] splitIntoSentences(String text) {
         return text.split("(?<=[.!?])\\s+|(?<=\\n)");
     }
@@ -135,8 +121,12 @@ public class DocumentChunkingService {
         return tail;
     }
 
-    private int estimateTokens(String text) {
-        // ~4 characters per token approximation
-        return (int) Math.ceil(text.length() / 4.0);
+    /**
+     * FIX #37 — use the accurate {@link TokenizerService} (cl100k_base) instead
+     * of the character-length heuristic.  Falls back gracefully when jtokkit is
+     * unavailable (TokenizerService handles this internally).
+     */
+    private int countTokens(String text) {
+        return tokenizerService.countTokens(text);
     }
 }

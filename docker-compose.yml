@@ -26,7 +26,12 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DB_HOST: localhost
+      # FIX #34 — DB_HOST must be the Docker Compose service name ("postgres"),
+      # not "localhost".  Inside the Docker network each service is reachable by
+      # its service name; "localhost" inside the app container resolves to the
+      # app container itself, not to the postgres container, so the JDBC
+      # connection attempt fails with "Connection refused" at startup.
+      DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ragplatform
       DB_USER: raguser

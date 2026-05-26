@@ -1,14 +1,21 @@
 /**
  * DocAI — Global Frontend Utility (window.DocAI)
  * Provides authenticated API helpers and toast notifications.
- * Fix #19: This file was missing; every page that loads it was broken.
+ *
+ * FIX #19: This file was missing entirely.
+ * FIX #35: File was placed under src/main/resources/templates/js/app.js —
+ *          Thymeleaf's template resolver treats that directory as its root for
+ *          .html templates, but it does NOT serve arbitrary files from it as
+ *          static assets.  Spring Boot's ResourceHandler only serves files
+ *          from src/main/resources/static/ (and /public, /resources,
+ *          /META-INF/resources).  Every page that referenced th:src="@{/js/app.js}"
+ *          received a 404 because the file was never reachable via HTTP.
+ *          Correct location: src/main/resources/static/js/app.js
  */
 (function () {
     'use strict';
 
     // ── Token management ─────────────────────────────────────────────────
-    // Prefer HttpOnly cookie (set by AuthController); fall back to
-    // localStorage only for legacy compatibility during the transition.
     function getToken() {
         return localStorage.getItem('jwt_token') || null;
     }
@@ -26,7 +33,6 @@
         const token = getToken();
         const headers = { 'Content-Type': 'application/json', ...extra };
         if (token) headers['Authorization'] = 'Bearer ' + token;
-        // CSRF token from the meta tag (populated by Thymeleaf on protected pages)
         const csrfToken  = document.querySelector('meta[name="_csrf"]')?.content;
         const csrfHeader = document.querySelector('meta[name="_csrf_header"]')?.content;
         if (csrfToken && csrfHeader) headers[csrfHeader] = csrfToken;
@@ -37,25 +43,23 @@
         const options = {
             method,
             headers: authHeaders(),
-            credentials: 'include',   // send HttpOnly jwt_token cookie
+            credentials: 'include',
         };
         if (body !== undefined) options.body = JSON.stringify(body);
 
         const res = await fetch(url, options);
 
-        // 401 → clear stale token and redirect to login
         if (res.status === 401) {
             clearToken();
             window.location.href = '/login';
             throw new Error('Session expired — please log in again.');
         }
 
-        if (res.status === 204) return null;   // No Content
+        if (res.status === 204) return null;
 
         const data = await res.json().catch(() => ({}));
 
         if (!res.ok) {
-            // RFC 9457 ProblemDetail shape
             const msg = data.detail || data.message || `Request failed (${res.status})`;
             throw new Error(msg);
         }
@@ -65,14 +69,12 @@
 
     // ── Public API ───────────────────────────────────────────────────────
     const DocAI = {
-        // HTTP verbs
         get:  (url)        => request('GET',    url),
         post: (url, body)  => request('POST',   url, body),
         put:  (url, body)  => request('PUT',    url, body ?? {}),
         patch:(url, body)  => request('PATCH',  url, body),
         del:  (url)        => request('DELETE', url),
 
-        // Multipart upload (no JSON header override)
         upload(url, formData) {
             const token = getToken();
             const headers = { credentials: 'include' };
@@ -80,12 +82,10 @@
             return fetch(url, { method: 'POST', headers, body: formData, credentials: 'include' });
         },
 
-        // Token helpers
         setToken,
         getToken,
         clearToken,
 
-        // ── Toast notifications ──────────────────────────────────────────
         /**
          * @param {string} message
          * @param {'success'|'danger'|'warning'|'info'} type
@@ -115,7 +115,7 @@
   </div>
 </div>`;
             container.insertAdjacentHTML('beforeend', html);
-            const el   = document.getElementById(id);
+            const el      = document.getElementById(id);
             const bsToast = new bootstrap.Toast(el, { delay: duration });
             bsToast.show();
             el.addEventListener('hidden.bs.toast', () => el.remove());

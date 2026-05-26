@@ -113,10 +113,14 @@ app:
     allowed-origins: ${CORS_ORIGINS:http://localhost:8080}
 
   # FIX #4 — Rate limiting for auth endpoints
+  # FIX #38 — trust-x-forwarded-for defaults to false to prevent IP spoofing bypass.
+  #           Set to true ONLY when the application is behind a trusted reverse proxy
+  #           (nginx, AWS ALB, etc.) that appends an unforgeable last XFF entry.
   rate-limit:
     auth:
-      max-requests: 10        # max requests per IP per window
-      window-seconds: 60      # rolling window size in seconds
+      max-requests: 10
+      window-seconds: 60
+      trust-x-forwarded-for: false   # FIX #35: opt-in, safe default
 
   # FIX #29 — Token cleanup schedule (default: top of every hour)
   auth:

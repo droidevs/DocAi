@@ -18,22 +18,29 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * FIX #4 — Token-bucket rate limiter for auth endpoints.
+ * Token-bucket rate limiter for auth endpoints (Fix #4 from the original set).
  *
- * <p>Protects /api/auth/login and /api/auth/register against brute-force
- * and credential-stuffing attacks.  Each client IP gets its own bucket that
- * refills at a configurable rate.  No Redis dependency required — the
- * in-process ConcurrentHashMap is sufficient for a single-node deployment
- * and can be swapped for Redis later.
+ * FIX #35 — The original {@link #resolveClientIp(HttpServletRequest)} trusted
+ * the {@code X-Forwarded-For} (XFF) header blindly.  An attacker could rotate
+ * through arbitrary spoofed IP addresses by sending
+ * {@code X-Forwarded-For: 1.2.3.4} with every request, making every request
+ * appear to come from a different "IP" and completely bypassing the rate limiter.
  *
- * <p>Configuration (application.yml):
+ * <p>The fix adds a configurable opt-in:
  * <pre>
  * app:
  *   rate-limit:
  *     auth:
- *       max-requests: 10          # max burst per window
- *       window-seconds: 60        # refill window in seconds
+ *       trust-x-forwarded-for: false   # default; set true only behind a trusted proxy
  * </pre>
+ *
+ * <p>When {@code trust-x-forwarded-for} is {@code true} (reverse-proxy deployments),
+ * only the <em>last</em> IP in the XFF chain is used.  The last entry is appended
+ * by the nearest trusted proxy and cannot be spoofed by the client — unlike the
+ * first entry, which the client can forge freely.
+ *
+ * <p>When {@code false} (the safe default), {@link HttpServletRequest#getRemoteAddr()}
+ * is always used regardless of any XFF header.
  */
 @Component
 @Slf4j
@@ -45,7 +52,16 @@ public class RateLimitFilter extends OncePerRequestFilter {
     @Value("${app.rate-limit.auth.window-seconds:60}")
     private long windowSeconds;
 
-    /** IP → bucket state */
+    /**
+     * FIX #35 — opt-in flag. Off by default so that deployments without a
+     * trusted reverse proxy cannot be rate-limit bypassed via a spoofed XFF.
+     * Set to {@code true} only when the application sits behind a proxy that
+     * unconditionally overwrites (not appends) the XFF header, or only when
+     * the last entry in the chain is controlled by a trusted proxy.
+     */
+    @Value("${app.rate-limit.auth.trust-x-forwarded-for:false}")
+    private boolean trustXForwardedFor;
+
     private final Map<String, Bucket> buckets = new ConcurrentHashMap<>();
 
     private static final String[] RATE_LIMITED_PATHS = {
@@ -71,7 +87,8 @@ public class RateLimitFilter extends OncePerRequestFilter {
         }
 
         String clientIp = resolveClientIp(request);
-        Bucket bucket = buckets.computeIfAbsent(clientIp, k -> new Bucket(maxRequests, windowSeconds));
+        Bucket bucket   = buckets.computeIfAbsent(
+                clientIp, k -> new Bucket(maxRequests, windowSeconds));
 
         if (!bucket.tryConsume()) {
             log.warn("Rate limit exceeded for IP {} on path {}", clientIp, path);
@@ -85,12 +102,31 @@ public class RateLimitFilter extends OncePerRequestFilter {
         chain.doFilter(request, response);
     }
 
-    /** Resolves the real client IP, honouring X-Forwarded-For when behind a proxy. */
+    /**
+     * FIX #35 — Resolve the effective client IP safely.
+     *
+     * <ul>
+     *   <li>When {@code trust-x-forwarded-for=false} (default): always use
+     *       {@link HttpServletRequest#getRemoteAddr()}, which is the actual
+     *       TCP peer address and cannot be spoofed.</li>
+     *   <li>When {@code trust-x-forwarded-for=true}: use the <em>last</em>
+     *       non-blank token in the XFF header.  The last token is appended by
+     *       the nearest proxy (trusted) rather than the client (untrusted),
+     *       making it far harder to forge.</li>
+     * </ul>
+     */
     private String resolveClientIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) {
-            // Take only the first address in the chain
-            return forwarded.split(",")[0].trim();
+        if (trustXForwardedFor) {
+            String xff = request.getHeader("X-Forwarded-For");
+            if (xff != null && !xff.isBlank()) {
+                String[] parts = xff.split(",");
+                // Use the LAST entry (appended by the nearest trusted proxy)
+                // not the FIRST entry (supplied by the client and trivially forged)
+                for (int i = parts.length - 1; i >= 0; i--) {
+                    String candidate = parts[i].trim();
+                    if (!candidate.isEmpty()) return candidate;
+                }
+            }
         }
         return request.getRemoteAddr();
     }
@@ -105,16 +141,15 @@ public class RateLimitFilter extends OncePerRequestFilter {
         private volatile long windowStart;
 
         Bucket(int capacity, long windowSeconds) {
-            this.capacity    = capacity;
+            this.capacity     = capacity;
             this.windowMillis = windowSeconds * 1000L;
-            this.tokens      = new AtomicInteger(capacity);
-            this.windowStart = Instant.now().toEpochMilli();
+            this.tokens       = new AtomicInteger(capacity);
+            this.windowStart  = Instant.now().toEpochMilli();
         }
 
         synchronized boolean tryConsume() {
             long now = Instant.now().toEpochMilli();
             if (now - windowStart >= windowMillis) {
-                // New window — reset bucket
                 windowStart = now;
                 tokens.set(capacity);
             }
